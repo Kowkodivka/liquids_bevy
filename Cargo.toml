@@ -1,0 +1,8 @@
+[package]
+name = "liquids_bevy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.15.0"
+bevy-inspector-egui = "0.28.0"
