@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 bevy = "0.15.0"
 bevy-inspector-egui = "0.28.0"
+bevy_pancam = "0.16.0"
