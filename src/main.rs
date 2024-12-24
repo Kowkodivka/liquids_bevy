@@ -5,14 +5,15 @@ use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_pancam::{PanCam, PanCamPlugin};
 
 const RADIUS: f32 = 1.0;
-const MASS: f32 = 1.0;
-const SMOOTHING_RADIUS: f32 = 2.0;
-const TARGET_DENSITY: f32 = 0.75;
-const PRESSURE_MULTIPLIER: f32 = 2.0;
+const MASS: f32 = 50.0;
+const SMOOTHING_RADIUS: f32 = 5.0;
+const TARGET_DENSITY: f32 = 1500.0;
+const PRESSURE_MULTIPLIER: f32 = 1.5;
 const WIDTH: f32 = 100.0;
 const HEIGHT: f32 = 100.0;
 const GRAVITY: f32 = 10.0;
-const DAMPING_FACTOR: f32 = 0.995;
+const DAMPING_FACTOR: f32 = 0.99;
+const E: f32 = 0.2;
 
 #[derive(Component)]
 struct Velocity(Vec3);
@@ -39,6 +40,7 @@ fn main() {
                 update_system,
                 collision_system,
                 boundary_collision_system,
+                update_colors_system,
             ),
         )
         .run();
@@ -52,7 +54,7 @@ fn setup(
     commands.spawn((Camera2d, PanCam::default()));
 
     let square_size = 10;
-    let spacing = 10.0;
+    let spacing = 5.0;
 
     for x in 0..square_size {
         for y in 0..square_size {
@@ -124,7 +126,6 @@ fn cache_density_system(
 ) {
     let all_transforms: Vec<_> = transforms_query.iter().collect();
 
-    // Очищаем кеш
     density_cache.densities.clear();
 
     for (entity, transform) in &all_transforms {
@@ -161,7 +162,6 @@ fn velocity_system(
             velocity.0 += pressure_acceleration * delta_time;
             velocity.0 += Vec3::new(0.0, -1.0, 0.0) * GRAVITY * delta_time;
 
-            // Apply damping
             velocity.0 *= DAMPING_FACTOR;
         } else {
             error!("Missing density for entity {:?}", entity);
@@ -181,14 +181,18 @@ fn boundary_collision_system(mut query: Query<(&mut Transform, &mut Velocity)>) 
     for (mut transform, mut velocity) in query.iter_mut() {
         let position = transform.translation;
 
-        if position.x <= -WIDTH / 2.0 || position.x >= WIDTH / 2.0 {
-            velocity.0.x *= -1.0 * DAMPING_FACTOR;
+        // Обработка оси X
+        if position.x < -WIDTH / 2.0 || position.x > WIDTH / 2.0 {
+            velocity.0.x *= -DAMPING_FACTOR; // Инвертируем скорость с учетом демпфирования
             transform.translation.x = position.x.clamp(-WIDTH / 2.0, WIDTH / 2.0);
+            // Обрезаем координаты
         }
 
-        if position.y <= -HEIGHT / 2.0 || position.y >= HEIGHT / 2.0 {
-            velocity.0.y *= -1.0 * DAMPING_FACTOR;
+        // Обработка оси Y
+        if position.y < -HEIGHT / 2.0 || position.y > HEIGHT / 2.0 {
+            velocity.0.y *= -DAMPING_FACTOR; // Инвертируем скорость с учетом демпфирования
             transform.translation.y = position.y.clamp(-HEIGHT / 2.0, HEIGHT / 2.0);
+            // Обрезаем координаты
         }
     }
 }
@@ -204,7 +208,6 @@ fn collision_system(
         .map(|(entity, transform)| (entity, transform.translation))
         .collect();
 
-    // Сначала определяем коллизии и вычисляем импульсы
     for i in 0..transforms_and_positions.len() {
         for j in (i + 1)..transforms_and_positions.len() {
             let (entity_a, position_a) = transforms_and_positions[i];
@@ -215,7 +218,6 @@ fn collision_system(
             if distance < 2.0 * RADIUS {
                 let normal = (position_b - position_a).normalize();
 
-                // Проверяем наличие компонентов Velocity у обеих сущностей
                 if let (Ok(velocity_a), Ok(velocity_b)) = (
                     velocities_query.get(entity_a),
                     velocities_query.get(entity_b),
@@ -227,7 +229,7 @@ fn collision_system(
                         continue;
                     }
 
-                    let impulse = (2.0 * velocity_along_normal) / (2.0 * MASS);
+                    let impulse = -(1.0 + E) * velocity_along_normal * MASS;
 
                     let impulse_a = impulse * normal * -1.0;
                     let impulse_b = impulse * normal;
@@ -239,10 +241,25 @@ fn collision_system(
         }
     }
 
-    // Затем применяем изменения
     for (entity, impulse) in collision_impulses {
         if let Ok(mut velocity) = velocities_query.get_mut(entity) {
-            velocity.1 .0 += impulse;
+            velocity.1 .0 += impulse / MASS * DAMPING_FACTOR;
+        }
+    }
+}
+
+fn update_colors_system(
+    density_cache: Res<DensityCache>,
+    query: Query<(Entity, &mut MeshMaterial2d<ColorMaterial>)>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    for (entity, material_handle) in query.iter() {
+        if let (Some(material), Some(density)) = (
+            materials.get_mut(material_handle),
+            density_cache.densities.get(&entity),
+        ) {
+            let hue = (density * 360.0) % 360.0;
+            material.color = Color::hsl(hue, 0.95, 0.7);
         }
     }
 }
