@@ -4,13 +4,21 @@ use bevy::prelude::*;
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_pancam::{PanCam, PanCamPlugin};
 
+const MASS: f32 = 1.0;
+const SMOOTHING_RADIUS: f32 = 10.0;
+const TARGET_DENSITY: f32 = 5.0;
+const PRESSURE_MULTIPLIER: f32 = 1.0;
+
+#[derive(Component)]
+struct Velocity(Vec3);
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(WorldInspectorPlugin::new())
         .add_plugins(PanCamPlugin::default())
         .add_systems(Startup, setup)
-        .add_systems(Update, handle_density_info)
+        .add_systems(Update, simulation_step)
         .run();
 }
 
@@ -36,6 +44,7 @@ fn setup(
                 Mesh2d(meshes.add(Circle::new(1.0))),
                 MeshMaterial2d(materials.add(Color::hsl(0.5, 0.95, 0.7))),
                 Transform::from_translation(position),
+                Velocity(Vec3::ZERO),
             ));
         }
     }
@@ -47,47 +56,47 @@ fn smoothing_kernel(radius: f32, distance: f32) -> f32 {
     value * value * value / volume
 }
 
-fn calculate_density(point: Vec3, query: Query<&Transform>) -> f32 {
-    let mut density = 0.0;
+fn smoothing_kernel_derivative(radius: f32, distance: f32) -> f32 {
+    if distance > radius {
+        0.0
+    } else {
+        let f = radius * radius - distance * distance;
+        let scale = -24.0 / (PI * radius.powi(8));
 
-    let mass = 1.0;
-    let smoothing_radius = 10.0;
-
-    for position in query.iter() {
-        let distance = position.translation.distance(point);
-        let influence = smoothing_kernel(smoothing_radius, distance);
-
-        density += mass * influence
-    }
-
-    density
-}
-
-fn handle_density_info(
-    keys: Res<ButtonInput<KeyCode>>,
-    windows: Query<&Window>,
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    transforms_query: Query<&Transform>,
-) {
-    if keys.just_released(KeyCode::KeyE) {
-        if let Some(world_position) = get_mouse_world_position(camera_query, windows) {
-            let density = calculate_density(world_position.extend(0.0), transforms_query);
-            println!("Density at {:?}: {}", world_position, density);
-        }
+        scale * distance * f * f
     }
 }
 
-fn get_mouse_world_position(
-    camera_query: Query<(&Camera, &GlobalTransform)>,
-    windows: Query<&Window>,
-) -> Option<Vec2> {
-    let (camera, camera_transform) = camera_query.get_single().ok()?;
-    let window = windows.get_single().ok()?;
+fn calculate_density(point: Vec3, transforms: &[&Transform]) -> f32 {
+    transforms.iter().fold(0.0, |density, &transform| {
+        let distance = transform.translation.distance(point);
+        density + MASS * smoothing_kernel(SMOOTHING_RADIUS, distance)
+    })
+}
 
-    let cursor_position = window.cursor_position()?;
-    Some(
-        camera
-            .viewport_to_world_2d(camera_transform, cursor_position)
-            .unwrap(),
-    )
+fn density_to_pressure(density: f32) -> f32 {
+    (density - TARGET_DENSITY) * PRESSURE_MULTIPLIER
+}
+
+fn calculate_pressure_force(point: Vec3, transforms: &[&Transform]) -> Vec3 {
+    let density = calculate_density(point, transforms);
+    transforms
+        .iter()
+        .fold(Vec3::ZERO, |mut pressure_force, &transform| {
+            let distance = transform.translation.distance(point);
+
+            if distance == 0.0 {
+                return pressure_force;
+            }
+
+            let direction = (transform.translation - point) / distance;
+            let slope = smoothing_kernel_derivative(SMOOTHING_RADIUS, distance);
+
+            pressure_force += -density_to_pressure(density) * direction * slope * MASS / density;
+            pressure_force
+        })
+}
+
+fn simulation_step(time: Res<Time>) {
+    let delta_time = time.delta_secs();
 }
