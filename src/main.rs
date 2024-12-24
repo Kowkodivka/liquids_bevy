@@ -76,19 +76,21 @@ fn setup(
 }
 
 fn smoothing_kernel(radius: f32, distance: f32) -> f32 {
-    let volume = PI * radius.powi(8) / 4.0;
-    let value = (radius * radius - distance * distance).max(0.0);
-    value * value * value / volume
+    if distance >= radius {
+        0.0
+    } else {
+        let volume = (PI * radius.powi(4)) / 6.0;
+        (radius - distance).powi(2) / volume
+    }
 }
 
 fn smoothing_kernel_derivative(radius: f32, distance: f32) -> f32 {
     if distance > radius {
         0.0
     } else {
-        let f = radius * radius - distance * distance;
-        let scale = -24.0 / (PI * radius.powi(8));
+        let scale = 12.0 / (radius.powi(4) * PI);
 
-        scale * distance * f * f
+        (distance - radius) * scale
     }
 }
 
@@ -109,7 +111,7 @@ fn calculate_pressure_force(point: Vec3, transforms: &[&Transform], density: f32
         .fold(Vec3::ZERO, |mut pressure_force, &transform| {
             let distance = transform.translation.distance(point);
 
-            if distance == 0.0 {
+            if distance == 0.0 || distance.is_nan() {
                 return pressure_force;
             }
 
@@ -175,18 +177,14 @@ fn boundary_collision_system(mut query: Query<(&mut Transform, &mut Velocity)>) 
     for (mut transform, mut velocity) in query.iter_mut() {
         let position = transform.translation;
 
-        // Обработка оси X
         if position.x < -WIDTH / 2.0 || position.x > WIDTH / 2.0 {
-            velocity.0.x *= -DAMPING_FACTOR; // Инвертируем скорость с учетом демпфирования
+            velocity.0.x *= -DAMPING_FACTOR;
             transform.translation.x = position.x.clamp(-WIDTH / 2.0, WIDTH / 2.0);
-            // Обрезаем координаты
         }
 
-        // Обработка оси Y
         if position.y < -HEIGHT / 2.0 || position.y > HEIGHT / 2.0 {
-            velocity.0.y *= -DAMPING_FACTOR; // Инвертируем скорость с учетом демпфирования
+            velocity.0.y *= -DAMPING_FACTOR;
             transform.translation.y = position.y.clamp(-HEIGHT / 2.0, HEIGHT / 2.0);
-            // Обрезаем координаты
         }
     }
 }
