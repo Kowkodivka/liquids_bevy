@@ -41,6 +41,7 @@ fn main() {
                 collision_system,
                 boundary_collision_system,
                 update_colors_system,
+                update_input_system,
             ),
         )
         .run();
@@ -135,11 +136,6 @@ fn cache_density_system(
         );
         density_cache.densities.insert(*entity, density);
     }
-
-    debug!(
-        "Cached densities updated: {} entries",
-        density_cache.densities.len()
-    );
 }
 
 fn velocity_system(
@@ -163,8 +159,6 @@ fn velocity_system(
             velocity.0 += Vec3::new(0.0, -1.0, 0.0) * GRAVITY * delta_time;
 
             velocity.0 *= DAMPING_FACTOR;
-        } else {
-            error!("Missing density for entity {:?}", entity);
         }
     }
 }
@@ -260,6 +254,37 @@ fn update_colors_system(
         ) {
             let hue = (density * 360.0) % 360.0;
             material.color = Color::hsl(hue, 0.95, 0.7);
+        }
+    }
+}
+
+fn update_input_system(
+    input: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window>,
+    camera_query: Single<(&Camera, &GlobalTransform)>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    let (camera, camera_transform) = *camera_query;
+
+    if let Some(cursor_position) = windows.single().cursor_position() {
+        for key in input.get_just_released() {
+            match key {
+                KeyCode::KeyF => {
+                    if let Ok(point) =
+                        camera.viewport_to_world_2d(camera_transform, cursor_position)
+                    {
+                        commands.spawn((
+                            Mesh2d(meshes.add(Circle::new(RADIUS))),
+                            MeshMaterial2d(materials.add(Color::hsl(0.5, 0.95, 0.7))),
+                            Transform::from_translation(Vec3::new(point.x, point.y, 0.0)),
+                            Velocity(Vec3::ZERO),
+                        ));
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
