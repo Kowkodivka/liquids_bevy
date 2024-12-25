@@ -23,6 +23,11 @@ struct DensityCache {
     densities: HashMap<Entity, f32>,
 }
 
+#[derive(Resource)]
+struct DragState {
+    selected_entity: Option<Entity>,
+}
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
@@ -31,6 +36,9 @@ fn main() {
         .add_systems(Startup, setup)
         .insert_resource(DensityCache {
             densities: HashMap::new(),
+        })
+        .insert_resource(DragState {
+            selected_entity: None,
         })
         .add_systems(
             Update,
@@ -41,7 +49,9 @@ fn main() {
                 collision_system,
                 boundary_collision_system,
                 update_colors_system,
-                update_input_system,
+                mouse_input_system,
+                time_control_system,
+                mouse_object_spawn_system,
             ),
         )
         .run();
@@ -52,10 +62,16 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    commands.spawn((Camera2d, PanCam::default()));
+    commands.spawn((
+        Camera2d,
+        PanCam {
+            grab_buttons: vec![],
+            ..default()
+        },
+    ));
 
     let square_size = 10;
-    let spacing = 5.0;
+    let spacing = 1.5 * RADIUS;
 
     for x in 0..square_size {
         for y in 0..square_size {
@@ -256,32 +272,88 @@ fn update_colors_system(
     }
 }
 
-fn update_input_system(
+fn mouse_input_system(
+    mouse_input: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
+    mut drag_state: ResMut<DragState>,
+    mut query: Query<(Entity, &mut Transform, &mut Velocity)>,
+) {
+    let window = windows.single();
+    let (camera, camera_transform) = camera_query.single();
+    static mut LAST_MOUSE_POSITION: Option<Vec2> = None;
+
+    if let Some(cursor_position) = window.cursor_position() {
+        unsafe {
+            if mouse_input.just_pressed(MouseButton::Left) {
+                for (entity, transform, _) in query.iter_mut() {
+                    let position = camera.viewport_to_world_2d(camera_transform, cursor_position);
+                    if let Ok(position) = position {
+                        if transform.translation.truncate().distance(position) <= RADIUS {
+                            drag_state.selected_entity = Some(entity);
+                            LAST_MOUSE_POSITION = Some(cursor_position);
+                            break;
+                        }
+                    }
+                }
+            } else if mouse_input.just_released(MouseButton::Left) {
+                if let Some(entity) = drag_state.selected_entity {
+                    if let Some(last_position) = LAST_MOUSE_POSITION {
+                        if let Ok((_, _, mut velocity)) = query.get_mut(entity) {
+                            let current_position = cursor_position;
+                            let delta = current_position - last_position;
+                            velocity.0 = Vec3::new(delta.x, delta.y, 0.0) * 10.0;
+                        }
+                    }
+                }
+                drag_state.selected_entity = None;
+                LAST_MOUSE_POSITION = None;
+            } else if let Some(entity) = drag_state.selected_entity {
+                if let Ok((_, mut transform, _)) = query.get_mut(entity) {
+                    if let Ok(world_position) =
+                        camera.viewport_to_world_2d(camera_transform, cursor_position)
+                    {
+                        transform.translation.x = world_position.x;
+                        transform.translation.y = world_position.y;
+                        LAST_MOUSE_POSITION = Some(cursor_position);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn time_control_system(input: Res<ButtonInput<KeyCode>>, mut time: ResMut<Time<Virtual>>) {
+    if input.just_pressed(KeyCode::Space) {
+        if time.is_paused() {
+            time.unpause();
+        } else {
+            time.pause();
+        }
+    }
+}
+
+fn mouse_object_spawn_system(
     input: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
-    camera_query: Single<(&Camera, &GlobalTransform)>,
+    camera_query: Query<(&Camera, &GlobalTransform)>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let (camera, camera_transform) = *camera_query;
+    let (camera, camera_transform) = camera_query.single();
 
     if let Some(cursor_position) = windows.single().cursor_position() {
-        for key in input.get_just_released() {
-            match key {
-                KeyCode::KeyF => {
-                    if let Ok(point) =
-                        camera.viewport_to_world_2d(camera_transform, cursor_position)
-                    {
-                        commands.spawn((
-                            Mesh2d(meshes.add(Circle::new(RADIUS))),
-                            MeshMaterial2d(materials.add(Color::hsl(0.5, 0.95, 0.7))),
-                            Transform::from_translation(Vec3::new(point.x, point.y, 0.0)),
-                            Velocity(Vec3::ZERO),
-                        ));
-                    }
-                }
-                _ => {}
+        if input.just_pressed(KeyCode::KeyF) {
+            if let Ok(world_position) =
+                camera.viewport_to_world_2d(camera_transform, cursor_position)
+            {
+                commands.spawn((
+                    Mesh2d(meshes.add(Circle::new(RADIUS))),
+                    MeshMaterial2d(materials.add(Color::hsl(0.5, 0.95, 0.7))),
+                    Transform::from_translation(Vec3::new(world_position.x, world_position.y, 0.0)),
+                    Velocity(Vec3::ZERO),
+                ));
             }
         }
     }
