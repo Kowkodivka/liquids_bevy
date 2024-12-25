@@ -4,16 +4,18 @@ use bevy::{prelude::*, utils::HashMap};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_pancam::{PanCam, PanCamPlugin};
 
+// TODO: сделать сетку для оптимизации рассчетов
+
 const RADIUS: f32 = 1.0;
 const MASS: f32 = 50.0;
 const SMOOTHING_RADIUS: f32 = 5.0;
-const TARGET_DENSITY: f32 = 1500.0;
-const PRESSURE_MULTIPLIER: f32 = 1.5;
+const TARGET_DENSITY: f32 = 5000.0;
+const PRESSURE_MULTIPLIER: f32 = 2.0;
 const WIDTH: f32 = 100.0;
 const HEIGHT: f32 = 100.0;
 const GRAVITY: f32 = 10.0;
 const DAMPING_FACTOR: f32 = 0.99;
-const E: f32 = 0.2;
+const E: f32 = 0.01;
 
 #[derive(Component)]
 struct Velocity(Vec3);
@@ -71,7 +73,7 @@ fn setup(
     ));
 
     let square_size = 10;
-    let spacing = 1.5 * RADIUS;
+    let spacing = SMOOTHING_RADIUS;
 
     for x in 0..square_size {
         for y in 0..square_size {
@@ -127,14 +129,27 @@ fn calculate_pressure_force(point: Vec3, transforms: &[&Transform], density: f32
         .fold(Vec3::ZERO, |mut pressure_force, &transform| {
             let distance = transform.translation.distance(point);
 
-            if distance == 0.0 || distance.is_nan() {
+            if distance <= f32::EPSILON || distance.is_nan() {
                 return pressure_force;
             }
 
             let direction = (transform.translation - point) / distance;
             let slope = smoothing_kernel_derivative(SMOOTHING_RADIUS, distance);
 
-            pressure_force += -density_to_pressure(density) * direction * slope * MASS / density;
+            let density_safe = if density <= f32::EPSILON {
+                TARGET_DENSITY
+            } else {
+                density
+            };
+
+            let force_contribution =
+                -density_to_pressure(density) * direction * slope * MASS / density_safe;
+
+            if !force_contribution.is_finite() {
+                return pressure_force;
+            }
+
+            pressure_force += force_contribution;
             pressure_force
         })
 }
@@ -162,7 +177,7 @@ fn velocity_system(
     mut velocities_query: Query<(Entity, &Transform, &mut Velocity)>,
     density_cache: Res<DensityCache>,
 ) {
-    let delta_time = time.delta_secs();
+    let delta_time = time.delta_secs().max(1e-6);
 
     let all_transforms: Vec<_> = transforms_query.iter().collect();
 
@@ -170,22 +185,31 @@ fn velocity_system(
         let position = transform.translation;
 
         if let Some(&density) = density_cache.densities.get(&entity) {
-            let pressure_force = calculate_pressure_force(position, &all_transforms, density);
-            let pressure_acceleration = pressure_force / density;
+            let density_safe = density.max(1e-6);
+            let pressure_force = calculate_pressure_force(position, &all_transforms, density_safe);
+            let pressure_acceleration = pressure_force / density_safe;
 
-            velocity.0 += pressure_acceleration * delta_time;
+            if pressure_acceleration.is_finite() {
+                velocity.0 += pressure_acceleration * delta_time;
+            }
+
             velocity.0 += Vec3::new(0.0, -1.0, 0.0) * GRAVITY * delta_time;
-
             velocity.0 *= DAMPING_FACTOR;
+
+            if !velocity.0.is_finite() {
+                velocity.0 = Vec3::ZERO;
+            }
         }
     }
 }
 
 fn update_system(time: Res<Time>, mut query: Query<(&mut Transform, &Velocity)>) {
-    let delta_time = time.delta_secs();
+    let delta_time = time.delta_secs().max(1e-6);
 
     for (mut transform, velocity) in query.iter_mut() {
-        transform.translation += velocity.0 * delta_time;
+        if velocity.0.is_finite() {
+            transform.translation += velocity.0 * delta_time;
+        }
     }
 }
 
