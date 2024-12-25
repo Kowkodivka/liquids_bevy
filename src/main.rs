@@ -123,12 +123,12 @@ fn smoothing_kernel_derivative(radius: f32, distance: f32) -> f32 {
     }
 }
 
-fn calculate_density(point: Vec3, transforms: &[&Transform]) -> f32 {
-    transforms.iter().fold(0.0, |density, &transform| {
-        let distance = transform.translation.distance(point);
-        density + MASS * smoothing_kernel(SMOOTHING_RADIUS, distance)
-    })
-}
+// fn calculate_density(point: Vec3, transforms: &[&Transform]) -> f32 {
+//     transforms.iter().fold(0.0, |density, &transform| {
+//         let distance = transform.translation.distance(point);
+//         density + MASS * smoothing_kernel(SMOOTHING_RADIUS, distance)
+//     })
+// }
 
 fn density_to_pressure(density: f32) -> f32 {
     (density - TARGET_DENSITY) * PRESSURE_MULTIPLIER
