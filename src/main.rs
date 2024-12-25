@@ -10,10 +10,10 @@ use bevy_pancam::{PanCam, PanCamPlugin};
 
 const RADIUS: f32 = 1.0;
 const MASS: f32 = 50.0;
-const SMOOTHING_RADIUS: f32 = 5.0;
+const SMOOTHING_RADIUS: f32 = 7.0;
 const TARGET_DENSITY: f32 = 5000.0;
 const PRESSURE_MULTIPLIER: f32 = 2.0;
-const WIDTH: f32 = 100.0;
+const WIDTH: f32 = 200.0;
 const HEIGHT: f32 = 400.0;
 const GRAVITY: f32 = 10.0;
 const DAMPING_FACTOR: f32 = 0.99;
