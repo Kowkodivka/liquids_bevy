@@ -170,7 +170,7 @@ fn cache_density_system(
     mut density_cache: ResMut<DensityCache>,
     transforms_query: Query<(Entity, &Transform)>,
 ) {
-    let cell_size = SMOOTHING_RADIUS;
+    let cell_size = SMOOTHING_RADIUS.powi(2);
     let mut spatial_hash: HashMap<(i32, i32), Vec<(Entity, Vec3)>> = HashMap::new();
 
     for (entity, transform) in transforms_query.iter() {
