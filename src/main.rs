@@ -1,10 +1,12 @@
 use std::f32::consts::PI;
 
-use bevy::{prelude::*, utils::HashMap};
+use bevy::{
+    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    prelude::*,
+    utils::HashMap,
+};
 use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use bevy_pancam::{PanCam, PanCamPlugin};
-
-// TODO: сделать сетку для оптимизации рассчетов
 
 const RADIUS: f32 = 1.0;
 const MASS: f32 = 50.0;
@@ -35,6 +37,8 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_plugins(WorldInspectorPlugin::new())
         .add_plugins(PanCamPlugin::default())
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
+        .add_plugins(LogDiagnosticsPlugin::default())
         .add_systems(Startup, setup)
         .insert_resource(DensityCache {
             densities: HashMap::new(),
@@ -93,6 +97,13 @@ fn setup(
     }
 }
 
+fn hash_position(position: Vec3, cell_size: f32) -> (i32, i32) {
+    (
+        (position.x / cell_size).floor() as i32,
+        (position.y / cell_size).floor() as i32,
+    )
+}
+
 fn smoothing_kernel(radius: f32, distance: f32) -> f32 {
     if distance >= radius {
         0.0
@@ -123,70 +134,108 @@ fn density_to_pressure(density: f32) -> f32 {
     (density - TARGET_DENSITY) * PRESSURE_MULTIPLIER
 }
 
-fn calculate_pressure_force(point: Vec3, transforms: &[&Transform], density: f32) -> Vec3 {
-    transforms
-        .iter()
-        .fold(Vec3::ZERO, |mut pressure_force, &transform| {
-            let distance = transform.translation.distance(point);
+fn calculate_pressure_force(
+    point: Vec3,
+    point_cell: (i32, i32),
+    spatial_hash: &HashMap<(i32, i32), Vec<(Entity, Vec3)>>,
+    density: f32,
+) -> Vec3 {
+    let mut pressure_force = Vec3::ZERO;
 
-            if distance <= f32::EPSILON || distance.is_nan() {
-                return pressure_force;
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            if let Some(neighbors) = spatial_hash.get(&(point_cell.0 + dx, point_cell.1 + dy)) {
+                for &(_, neighbor_position) in neighbors {
+                    let distance = neighbor_position.distance(point);
+
+                    if distance <= f32::EPSILON || distance >= SMOOTHING_RADIUS || distance.is_nan()
+                    {
+                        continue;
+                    }
+
+                    let direction = (neighbor_position - point) / distance;
+                    let slope = smoothing_kernel_derivative(SMOOTHING_RADIUS, distance);
+
+                    pressure_force +=
+                        -density_to_pressure(density) * direction * slope * MASS / density;
+                }
             }
+        }
+    }
 
-            let direction = (transform.translation - point) / distance;
-            let slope = smoothing_kernel_derivative(SMOOTHING_RADIUS, distance);
-
-            let density_safe = if density <= f32::EPSILON {
-                TARGET_DENSITY
-            } else {
-                density
-            };
-
-            let force_contribution =
-                -density_to_pressure(density) * direction * slope * MASS / density_safe;
-
-            if !force_contribution.is_finite() {
-                return pressure_force;
-            }
-
-            pressure_force += force_contribution;
-            pressure_force
-        })
+    pressure_force
 }
 
 fn cache_density_system(
     mut density_cache: ResMut<DensityCache>,
     transforms_query: Query<(Entity, &Transform)>,
 ) {
-    let all_transforms: Vec<_> = transforms_query.iter().collect();
+    let cell_size = SMOOTHING_RADIUS;
+    let mut spatial_hash: HashMap<(i32, i32), Vec<(Entity, Vec3)>> = HashMap::new();
+
+    for (entity, transform) in transforms_query.iter() {
+        let position = transform.translation;
+        let cell = hash_position(position, cell_size);
+
+        spatial_hash
+            .entry(cell)
+            .or_insert_with(Vec::new)
+            .push((entity, position));
+    }
 
     density_cache.densities.clear();
 
-    for (entity, transform) in &all_transforms {
-        let density = calculate_density(
-            transform.translation,
-            &all_transforms.iter().map(|(_, t)| *t).collect::<Vec<_>>(),
-        );
-        density_cache.densities.insert(*entity, density);
+    for (entity, transform) in transforms_query.iter() {
+        let position = transform.translation;
+        let cell = hash_position(position, cell_size);
+
+        let mut density = 0.0;
+
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(neighbors) = spatial_hash.get(&(cell.0 + dx, cell.1 + dy)) {
+                    for &(_, neighbor_position) in neighbors {
+                        let distance = neighbor_position.distance(position);
+                        if distance < SMOOTHING_RADIUS {
+                            density += MASS * smoothing_kernel(SMOOTHING_RADIUS, distance);
+                        }
+                    }
+                }
+            }
+        }
+
+        density_cache.densities.insert(entity, density);
     }
 }
 
 fn velocity_system(
     time: Res<Time>,
-    transforms_query: Query<&Transform>,
+    transforms_query: Query<(Entity, &Transform)>,
     mut velocities_query: Query<(Entity, &Transform, &mut Velocity)>,
     density_cache: Res<DensityCache>,
 ) {
     let delta_time = time.delta_secs().max(1e-6);
+    let cell_size = SMOOTHING_RADIUS;
 
-    let all_transforms: Vec<_> = transforms_query.iter().collect();
+    let mut spatial_hash: HashMap<(i32, i32), Vec<(Entity, Vec3)>> = HashMap::new();
+    for (entity, transform) in transforms_query.iter() {
+        let position = transform.translation;
+        let cell = hash_position(position, cell_size);
+
+        spatial_hash
+            .entry(cell)
+            .or_insert_with(Vec::new)
+            .push((entity, position));
+    }
 
     for (entity, transform, mut velocity) in velocities_query.iter_mut() {
         let position = transform.translation;
+        let cell = hash_position(position, cell_size);
 
         if let Some(&density) = density_cache.densities.get(&entity) {
             let density_safe = density.max(1e-6);
-            let pressure_force = calculate_pressure_force(position, &all_transforms, density_safe);
+            let pressure_force =
+                calculate_pressure_force(position, cell, &spatial_hash, density_safe);
             let pressure_acceleration = pressure_force / density_safe;
 
             if pressure_acceleration.is_finite() {
