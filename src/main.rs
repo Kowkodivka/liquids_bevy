@@ -14,10 +14,11 @@ const SMOOTHING_RADIUS: f32 = 5.0;
 const TARGET_DENSITY: f32 = 5000.0;
 const PRESSURE_MULTIPLIER: f32 = 2.0;
 const WIDTH: f32 = 100.0;
-const HEIGHT: f32 = 100.0;
+const HEIGHT: f32 = 400.0;
 const GRAVITY: f32 = 10.0;
 const DAMPING_FACTOR: f32 = 0.99;
 const E: f32 = 0.01;
+const CELL_SIZE: f32 = SMOOTHING_RADIUS;
 
 #[derive(Component)]
 struct Velocity(Vec3);
@@ -76,7 +77,7 @@ fn setup(
         },
     ));
 
-    let square_size = 10;
+    let square_size = 20;
     let spacing = SMOOTHING_RADIUS;
 
     for x in 0..square_size {
@@ -118,17 +119,9 @@ fn smoothing_kernel_derivative(radius: f32, distance: f32) -> f32 {
         0.0
     } else {
         let scale = 12.0 / (radius.powi(4) * PI);
-
         (distance - radius) * scale
     }
 }
-
-// fn calculate_density(point: Vec3, transforms: &[&Transform]) -> f32 {
-//     transforms.iter().fold(0.0, |density, &transform| {
-//         let distance = transform.translation.distance(point);
-//         density + MASS * smoothing_kernel(SMOOTHING_RADIUS, distance)
-//     })
-// }
 
 fn density_to_pressure(density: f32) -> f32 {
     (density - TARGET_DENSITY) * PRESSURE_MULTIPLIER
@@ -166,43 +159,46 @@ fn calculate_pressure_force(
     pressure_force
 }
 
+fn calculate_spatial_hash(
+    transforms: &Query<(Entity, &Transform)>,
+    cell_size: f32,
+) -> HashMap<(i32, i32), Vec<(Entity, Vec3)>> {
+    let mut spatial_hash: HashMap<(i32, i32), Vec<(Entity, Vec3)>> = HashMap::new();
+
+    for (entity, transform) in transforms.iter() {
+        let position = transform.translation;
+        let cell = hash_position(position, cell_size);
+        spatial_hash
+            .entry(cell)
+            .or_default()
+            .push((entity, position));
+    }
+
+    spatial_hash
+}
+
 fn cache_density_system(
     mut density_cache: ResMut<DensityCache>,
     transforms_query: Query<(Entity, &Transform)>,
 ) {
-    let cell_size = SMOOTHING_RADIUS.powi(2);
-    let mut spatial_hash: HashMap<(i32, i32), Vec<(Entity, Vec3)>> = HashMap::new();
-
-    for (entity, transform) in transforms_query.iter() {
-        let position = transform.translation;
-        let cell = hash_position(position, cell_size);
-
-        spatial_hash
-            .entry(cell)
-            .or_insert_with(Vec::new)
-            .push((entity, position));
-    }
+    let spatial_hash = calculate_spatial_hash(&transforms_query, CELL_SIZE);
 
     density_cache.densities.clear();
 
     for (entity, transform) in transforms_query.iter() {
         let position = transform.translation;
-        let cell = hash_position(position, cell_size);
-
-        let mut density = 0.0;
-
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                if let Some(neighbors) = spatial_hash.get(&(cell.0 + dx, cell.1 + dy)) {
-                    for &(_, neighbor_position) in neighbors {
-                        let distance = neighbor_position.distance(position);
-                        if distance < SMOOTHING_RADIUS {
-                            density += MASS * smoothing_kernel(SMOOTHING_RADIUS, distance);
-                        }
-                    }
-                }
-            }
-        }
+        let cell = hash_position(position, CELL_SIZE);
+        let default = Vec::new();
+        let neighbors = spatial_hash.get(&cell).unwrap_or(&default);
+        let density = neighbors
+            .iter()
+            .filter(|&&(_, neighbor_position)| {
+                position.distance(neighbor_position) < SMOOTHING_RADIUS
+            })
+            .map(|&(_, neighbor_position)| {
+                MASS * smoothing_kernel(SMOOTHING_RADIUS, position.distance(neighbor_position))
+            })
+            .sum();
 
         density_cache.densities.insert(entity, density);
     }
@@ -210,17 +206,16 @@ fn cache_density_system(
 
 fn velocity_system(
     time: Res<Time>,
-    transforms_query: Query<(Entity, &Transform)>,
-    mut velocities_query: Query<(Entity, &Transform, &mut Velocity)>,
     density_cache: Res<DensityCache>,
+    transforms_query: Query<(Entity, &Transform)>,
+    mut velocities_query: Query<(Entity, &mut Velocity)>,
 ) {
-    let delta_time = time.delta_secs().max(1e-6);
-    let cell_size = SMOOTHING_RADIUS;
-
+    let delta_time = time.delta_secs();
     let mut spatial_hash: HashMap<(i32, i32), Vec<(Entity, Vec3)>> = HashMap::new();
+
     for (entity, transform) in transforms_query.iter() {
         let position = transform.translation;
-        let cell = hash_position(position, cell_size);
+        let cell = hash_position(position, SMOOTHING_RADIUS);
 
         spatial_hash
             .entry(cell)
@@ -228,37 +223,26 @@ fn velocity_system(
             .push((entity, position));
     }
 
-    for (entity, transform, mut velocity) in velocities_query.iter_mut() {
-        let position = transform.translation;
-        let cell = hash_position(position, cell_size);
-
+    for (entity, mut velocity) in velocities_query.iter_mut() {
         if let Some(&density) = density_cache.densities.get(&entity) {
+            let position = transforms_query.get(entity).unwrap().1.translation;
+            let cell = hash_position(position, SMOOTHING_RADIUS);
             let density_safe = density.max(1e-6);
+
             let pressure_force =
                 calculate_pressure_force(position, cell, &spatial_hash, density_safe);
-            let pressure_acceleration = pressure_force / density_safe;
 
-            if pressure_acceleration.is_finite() {
-                velocity.0 += pressure_acceleration * delta_time;
-            }
-
-            velocity.0 += Vec3::new(0.0, -1.0, 0.0) * GRAVITY * delta_time;
+            velocity.0 += pressure_force / density_safe * delta_time;
+            velocity.0 += Vec3::new(0.0, -GRAVITY, 0.0) * delta_time;
             velocity.0 *= DAMPING_FACTOR;
-
-            if !velocity.0.is_finite() {
-                velocity.0 = Vec3::ZERO;
-            }
         }
     }
 }
 
 fn update_system(time: Res<Time>, mut query: Query<(&mut Transform, &Velocity)>) {
-    let delta_time = time.delta_secs().max(1e-6);
-
+    let delta_time = time.delta_secs();
     for (mut transform, velocity) in query.iter_mut() {
-        if velocity.0.is_finite() {
-            transform.translation += velocity.0 * delta_time;
-        }
+        transform.translation += velocity.0 * delta_time;
     }
 }
 
@@ -282,41 +266,40 @@ fn collision_system(
     transforms_query: Query<(Entity, &Transform)>,
     mut velocities_query: Query<(Entity, &mut Velocity)>,
 ) {
+    let spatial_hash = calculate_spatial_hash(&transforms_query, CELL_SIZE);
     let mut collision_impulses: Vec<(Entity, Vec3)> = vec![];
 
-    let transforms_and_positions: Vec<_> = transforms_query
-        .iter()
-        .map(|(entity, transform)| (entity, transform.translation))
-        .collect();
+    for (&_cell, entities_positions) in spatial_hash.iter() {
+        let len = entities_positions.len();
+        for i in 0..len {
+            for j in (i + 1)..len {
+                let (entity_a, position_a) = entities_positions[i];
+                let (entity_b, position_b) = entities_positions[j];
 
-    for i in 0..transforms_and_positions.len() {
-        for j in (i + 1)..transforms_and_positions.len() {
-            let (entity_a, position_a) = transforms_and_positions[i];
-            let (entity_b, position_b) = transforms_and_positions[j];
+                let distance = position_a.distance(position_b);
 
-            let distance = position_a.distance(position_b);
+                if distance < 2.0 * RADIUS {
+                    let normal = (position_b - position_a).normalize();
 
-            if distance < 2.0 * RADIUS {
-                let normal = (position_b - position_a).normalize();
+                    if let (Ok(velocity_a), Ok(velocity_b)) = (
+                        velocities_query.get(entity_a),
+                        velocities_query.get(entity_b),
+                    ) {
+                        let relative_velocity = velocity_b.1 .0 - velocity_a.1 .0;
+                        let velocity_along_normal = relative_velocity.dot(normal);
 
-                if let (Ok(velocity_a), Ok(velocity_b)) = (
-                    velocities_query.get(entity_a),
-                    velocities_query.get(entity_b),
-                ) {
-                    let relative_velocity = velocity_b.1 .0 - velocity_a.1 .0;
-                    let velocity_along_normal = relative_velocity.dot(normal);
+                        if velocity_along_normal > 0.0 {
+                            continue;
+                        }
 
-                    if velocity_along_normal > 0.0 {
-                        continue;
+                        let impulse = -(1.0 + E) * velocity_along_normal * MASS;
+
+                        let impulse_a = impulse * normal * -1.0;
+                        let impulse_b = impulse * normal;
+
+                        collision_impulses.push((entity_a, impulse_a));
+                        collision_impulses.push((entity_b, impulse_b));
                     }
-
-                    let impulse = -(1.0 + E) * velocity_along_normal * MASS;
-
-                    let impulse_a = impulse * normal * -1.0;
-                    let impulse_b = impulse * normal;
-
-                    collision_impulses.push((entity_a, impulse_a));
-                    collision_impulses.push((entity_b, impulse_b));
                 }
             }
         }
